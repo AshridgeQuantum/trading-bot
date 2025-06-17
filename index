@@ -134,7 +134,8 @@
 
         // --- Configuration ---
         const config = {
-            pair: "SOL",
+            pair: "solana", // Use CoinGecko ID for the pair
+            vs_currency: "usd",
             leverage: 1,
             fee: 0.002,
             slippage: 0.001,
@@ -197,38 +198,31 @@
             }
         }
 
-        // --- API Fetching ---
-        async function fetchOhlc(pair, interval = 1, since = null) {
-            let apiUrl = `https://api.kraken.com/0/public/OHLC?pair=${pair}USD&interval=${interval}`;
-            if (since) {
-                apiUrl += `&since=${since}`;
-            }
-            // --- MODIFIED: Using a more reliable CORS proxy ---
-            const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(apiUrl)}`;
+        // --- API Fetching (MODIFIED TO USE COINGECKO) ---
+        async function fetchOhlc(pairId, vsCurrency) {
+            // CoinGecko provides minute data for the last 7 days. We fetch this on the first run.
+            // On subsequent runs, we'll fetch only the latest price to keep things current.
+            const url = `https://api.coingecko.com/api/v3/coins/${pairId}/ohlc?vs_currency=${vsCurrency}&days=7`;
             try {
-                const response = await fetch(proxyUrl);
+                const response = await fetch(url);
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 const data = await response.json();
-                if (data.error && data.error.length > 0) {
-                    throw new Error(`Kraken API error: ${data.error.join(', ')}`);
+                if (!Array.isArray(data) || data.length === 0) {
+                     throw new Error('Invalid data format received from CoinGecko API.');
                 }
-                const pairKey = Object.keys(data.result).find(key => key.startsWith(pair));
-                if (!pairKey) {
-                    throw new Error(`Could not find pair data for ${pair} in Kraken response.`);
-                }
-                return data.result[pairKey];
+                return data;
             } catch (error) {
                 log(`Failed to fetch OHLC data: ${error.message}`, 'error');
-                updateStatus('Data Unavailable', 'bg-yellow-500', 'text-yellow-200');
-                return [];
+                updateStatus('API Error', 'bg-red-500', 'text-red-300');
+                return null;
             }
         }
 
         // --- Indicator Calculations ---
         function calculateIndicators(data) {
-            const ema = (source, period) => {
+             const ema = (source, period) => {
                 if (!source || source.length < period) return new Array(source.length).fill(NaN);
                 let emaArray = new Array(source.length).fill(NaN);
                 let multiplier = 2 / (period + 1);
@@ -436,28 +430,18 @@
         async function mainLoop() {
             updateStatus('Fetching Data...', 'bg-blue-400 animate-pulse', 'text-blue-300');
             
-            const since_ts = historicalData.length > 0 ? historicalData[historicalData.length - 1].timestamp : null;
-            const new_candles_raw = await fetchOhlc(config.pair, 1, since_ts);
+            const new_ohlc_data = await fetchOhlc(config.pair, config.vs_currency);
 
-            if (new_candles_raw && new_candles_raw.length > 0) {
-                new_candles_raw.forEach(candle => {
-                    const candle_data = {
-                        timestamp: parseInt(candle[0]),
-                        open: parseFloat(candle[1]),
-                        high: parseFloat(candle[2]),
-                        low: parseFloat(candle[3]),
-                        close: parseFloat(candle[4])
-                    };
-                    if (!historicalData.some(d => d.timestamp === candle_data.timestamp)) {
-                        historicalData.push(candle_data);
-                    }
-                });
+            if (new_ohlc_data) {
+                // Convert CoinGecko format to our internal format
+                historicalData = new_ohlc_data.map(d => ({
+                    timestamp: d[0],
+                    open: d[1],
+                    high: d[2],
+                    low: d[3],
+                    close: d[4]
+                }));
                 
-                historicalData.sort((a, b) => a.timestamp - b.timestamp);
-                if (historicalData.length > 500) {
-                    historicalData = historicalData.slice(historicalData.length - 500);
-                }
-
                 if (historicalData.length >= config.min_data_points) {
                     const df_with_indicators = calculateIndicators(historicalData);
                     processTradingLogic(df_with_indicators);
